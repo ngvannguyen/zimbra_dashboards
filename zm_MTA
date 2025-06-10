@@ -1,0 +1,162 @@
+#!/usr/bin/python3
+##coding=utf-8
+# ------------------------------------------------------
+#
+# Zimbra Exporter - Phiên bản cho MÁY CHỦ MTA
+#
+# Script by : Jason Cheng (Đã được sửa đổi cho môi trường multi-server)
+# Website : www.jason.tools / blog.jason.tools
+# Version : 1.1 (Modified for MTA)
+# Date : 2025/06/10
+#
+# ------------------------------------------------------
+
+import requests
+import prometheus_client
+import os
+import psutil
+import time
+import datetime
+from prometheus_client.core import CollectorRegistry
+from prometheus_client import Gauge
+from prometheus_client import Counter
+from flask import Response,Flask
+
+# ------
+# define
+# ------
+
+# BIẾN MỚI: Đặt vai trò của máy chủ này.
+# Đây là phiên bản dành cho 'mta'.
+SERVER_ROLE = 'mta'
+
+PORT_EXPORTER = 9093
+
+MAILSERVER = 'mail.zimbra.domain' # Thay bằng tên mail server của bạn
+EXCLUDE_DOMAIN = '' 
+
+# ------
+
+# --------------
+# get info function
+def getcheck():
+
+    REGISTRY = CollectorRegistry(auto_describe=False)
+
+    # get stats (Phân tích log) - Rất quan trọng cho MTA
+    if SERVER_ROLE in ['mailbox', 'mta', 'all']:
+        get_st = os.popen('/opt/zimbra_pflogsumm.pl /var/log/zimbra.log | grep -v Redundent').read().splitlines()
+        st = Gauge("zimbra_stats","Zimbra Stats:",["name"],registry=REGISTRY)
+        for i in range(len(get_st)):
+            try:
+                st_name = get_st[i].split(' ')[1].strip().split('=')[0]
+                st_value = int(get_st[i].split('=')[1].strip())
+                st.labels(st_name).set(st_value)
+            except (IndexError, ValueError) as e:
+                print(f"Lỗi khi xử lý dòng stats: {get_st[i]} - {e}")
+                continue
+
+
+    # get top usage (Sử dụng quota) - KHÔNG chạy trên MTA
+    if SERVER_ROLE in ['mailbox', 'all']:
+        if (EXCLUDE_DOMAIN ==''):
+            get_qu_cmd = '/bin/su - zimbra -c "zmprov getQuotaUsage ' + MAILSERVER + '| grep -v \"spam.\" | grep -v \"virus-quarantine.\" | head -n 6"'
+        else:
+            get_qu_cmd = '/bin/su - zimbra -c "zmprov getQuotaUsage ' + MAILSERVER + '| grep -v \"' + EXCLUDE_DOMAIN + '\" | grep -v \"spam.\" | grep -v \"virus-quarantine.\" | head -n 6"'
+
+        get_qu = os.popen(get_qu_cmd).read().splitlines()
+        qu = Gauge("zimbra_quota_usage","Zimbra User Quota Usage:",["name","usage"],registry=REGISTRY)
+        for i in range(len(get_qu)):
+            try:
+                qu_name = get_qu[i].split(' ')[0].strip()
+                qu_usage = int(get_qu[i].split(' ')[2].strip())
+                qu_quota = int(get_qu[i].split(' ')[1].strip())
+                qu_value = 0
+                if (qu_quota != 0 and qu_usage != 0):
+                    qu_value = qu_usage / qu_quota
+                qu.labels(qu_name,qu_usage).set(qu_value)
+            except (IndexError, ValueError) as e:
+                print(f"Lỗi khi xử lý dòng quota: {get_qu[i]} - {e}")
+                continue
+
+    # get port litsen - Chỉ kiểm tra port liên quan đến MTA
+    if SERVER_ROLE in ['mta', 'all']:
+        pt = Gauge("zimbra_port","Zimbra Listen Ports:",["name","status"],registry=REGISTRY)
+        # Port 25 (SMTP) là cổng chính của MTA
+        get_pt = os.popen('netstat -tnpl | grep ":25"').read().strip()
+        if get_pt:
+            pt.labels("SMTP","LISTEN").set(1)
+        else:
+            pt.labels("SMTP","NOT_LISTEN").set(0)
+
+
+    # get cpu, mem, iowait, uptime, df (Chạy trên tất cả các máy chủ)
+    try:
+        Gauge("zimbra_cpu_usage","CPU Usage:",registry=REGISTRY).set(psutil.cpu_percent())
+        Gauge("zimbra_mem_usage","MEM Usage:",registry=REGISTRY).set(psutil.virtual_memory().percent)
+        Gauge("zimbra_iowait","IO_Wait:",registry=REGISTRY).set(str(psutil.cpu_times_percent()).split(",")[4].split("=")[1].strip())
+        Gauge("zimbra_uptime","Up Time:",registry=REGISTRY).set((time.time()-psutil.boot_time())/60/60/24)
+
+        get_df = os.popen('df / --output=pcent | tail -n 1').read().strip().replace('%','')
+        zv = Gauge("zimbra_disk_usage","Disk Usage:",registry=REGISTRY).set(get_df)
+    except Exception as e:
+        print(f"Lỗi khi lấy thông số hệ thống: {e}")
+
+    # get zimbra version - KHÔNG chạy trên MTA
+    if SERVER_ROLE in ['mailbox', 'all']:
+        try:
+            get_zv = os.popen('/bin/su - zimbra -c "/opt/zimbra/bin/zmcontrol -v"').read().split(' ')[1]
+            zv = Gauge("zimbra_version","Zimbra Version:",["version"],registry=REGISTRY)
+            zv.labels(get_zv).set(1)
+        except IndexError as e:
+            print(f"Lỗi khi lấy phiên bản Zimbra: {e}")
+
+    # get all accounts - KHÔNG chạy trên MTA
+    if SERVER_ROLE in ['mailbox', 'all']:
+        acc = Gauge("zimbra_account_status_total","Zimbra Account Status Total",["name"],registry=REGISTRY)
+        # ... (toàn bộ code đếm tài khoản không cần thiết trên MTA)
+
+    # get zimbra service (Chạy trên tất cả, tự nhận diện dịch vụ cục bộ)
+    get_sv = os.popen('/bin/su - zimbra -c "/opt/zimbra/bin/zmcontrol status"').read().splitlines()
+    sv = Gauge("zimbra_service_status","Zimbra Service Status",["name","status"],registry=REGISTRY)
+    for i in range(len(get_sv)):
+        if get_sv[i].startswith('Host'):
+            continue
+        try:
+            sv_value = 0
+            sv_name = get_sv[i][0:24].strip()
+            sv_status = get_sv[i][25:].strip()
+
+            if (sv_status == 'Running'):
+                sv_value = 1
+            else:
+                sv_status = "Not Running"
+            sv.labels(sv_name, sv_status).set(sv_value)
+        except Exception as e:
+            print(f"Lỗi khi xử lý trạng thái dịch vụ: {get_sv[i]} - {e}")
+            continue
+
+    # get queue (Hàng đợi mail) - Rất quan trọng cho MTA
+    if SERVER_ROLE in ['mta', 'all']:
+        get_zmq = os.popen('/opt/zimbra/libexec/zmqstat').read().splitlines()
+        zmq = Gauge("zimbra_queue","Mail Queue Stats",["name"],registry=REGISTRY)
+        for i in range(len(get_zmq)):
+            try:
+                zmq.labels(get_zmq[i].split('=')[0].strip()).set(get_zmq[i].split('=')[1].strip())
+            except (IndexError, ValueError) as e:
+                print(f"Lỗi khi xử lý hàng đợi mail: {get_zmq[i]} - {e}")
+                continue
+
+    # -----
+    return prometheus_client.generate_latest(REGISTRY)
+    # -----
+
+
+# metric route
+app = Flask(__name__)
+@app.route("/metrics")
+def ApiResponse():
+    return Response(getcheck(),mimetype="text/plain")
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0',port=PORT_EXPORTER)
