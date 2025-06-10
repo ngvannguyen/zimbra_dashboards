@@ -1,0 +1,103 @@
+#!/usr/bin/python3
+##coding=utf-8
+# ------------------------------------------------------
+#
+# Zimbra Exporter - Phiên bản cho MÁY CHỦ LDAP
+#
+# Script by : Jason Cheng (Đã được sửa đổi cho môi trường multi-server)
+# Website : www.jason.tools / blog.jason.tools
+# Version : 1.1 (Modified for LDAP)
+# Date : 2025/06/10
+#
+# ------------------------------------------------------
+
+import requests
+import prometheus_client
+import os
+import psutil
+import time
+import datetime
+from prometheus_client.core import CollectorRegistry
+from prometheus_client import Gauge
+from flask import Response,Flask
+
+# ------
+# define
+# ------
+
+# BIẾN MỚI: Đặt vai trò của máy chủ này.
+# Đây là phiên bản dành cho 'ldap'.
+SERVER_ROLE = 'ldap'
+
+PORT_EXPORTER = 9093
+
+# Các port mà LDAP sẽ lắng nghe
+PORT_LDAP = '389'
+PORT_LDAPS = '636'
+
+# ------
+
+# --------------
+# get info function
+def getcheck():
+
+    REGISTRY = CollectorRegistry(auto_describe=False)
+
+    # get port litsen - Quan trọng nhất cho LDAP
+    if SERVER_ROLE in ['ldap', 'all']:
+        pt = Gauge("zimbra_port","Zimbra Listen Ports:",["name","status"],registry=REGISTRY)
+        
+        ports_to_check = {
+            "LDAP": PORT_LDAP,
+            "LDAPS": PORT_LDAPS,
+        }
+        
+        for name, port in ports_to_check.items():
+            get_pt = os.popen(f'netstat -tnpl | grep ":{port} "').read().strip()
+            if get_pt:
+                pt.labels(name,"LISTEN").set(1)
+            else:
+                pt.labels(name,"NOT_LISTEN").set(0)
+
+    # get cpu, mem, iowait, uptime, df (Chạy trên tất cả các máy chủ)
+    try:
+        Gauge("zimbra_cpu_usage","CPU Usage:",registry=REGISTRY).set(psutil.cpu_percent())
+        Gauge("zimbra_mem_usage","MEM Usage:",registry=REGISTRY).set(psutil.virtual_memory().percent)
+        Gauge("zimbra_iowait","IO_Wait:",registry=REGISTRY).set(str(psutil.cpu_times_percent()).split(",")[4].split("=")[1].strip())
+        Gauge("zimbra_uptime","Up Time:",registry=REGISTRY).set((time.time()-psutil.boot_time())/60/60/24)
+
+        get_df = os.popen('df / --output=pcent | tail -n 1').read().strip().replace('%','')
+        Gauge("zimbra_disk_usage","Disk Usage:",registry=REGISTRY).set(int(get_df))
+    except Exception as e:
+        print(f"Lỗi khi lấy thông số hệ thống: {e}")
+
+    # get zimbra service (Chạy trên tất cả, tự nhận diện dịch vụ cục bộ)
+    get_sv = os.popen('/bin/su - zimbra -c "/opt/zimbra/bin/zmcontrol status"').read().splitlines()
+    sv = Gauge("zimbra_service_status","Zimbra Service Status",["name","status"],registry=REGISTRY)
+    for i in range(len(get_sv)):
+        if get_sv[i].startswith('Host'):
+            continue
+        try:
+            sv_value = 0
+            sv_name = get_sv[i][0:24].strip()
+            sv_status = get_sv[i][25:].strip()
+
+            if (sv_status == 'Running'):
+                sv_value = 1
+            else:
+                sv_status = "Not Running"
+            sv.labels(sv_name, sv_status).set(sv_value)
+        except Exception as e:
+            print(f"Lỗi khi xử lý trạng thái dịch vụ: {get_sv[i]} - {e}")
+            continue
+
+    return prometheus_client.generate_latest(REGISTRY)
+
+# metric route
+app = Flask(__name__)
+@app.route("/metrics")
+def ApiResponse():
+    return Response(getcheck(),mimetype="text/plain")
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0',port=PORT_EXPORTER)
