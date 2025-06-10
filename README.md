@@ -24,6 +24,11 @@ The following environment is tested:
   
 
 ```
+yum install \
+> https://repo.ius.io/ius-release-el7.rpm \
+> https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+yum -y install python36u-devel
+sudo pip3 install requests
 pip3 install flask
 pip3 install prometheus_client
 pip3 install psutil
