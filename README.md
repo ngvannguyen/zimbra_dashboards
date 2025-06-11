@@ -24,6 +24,8 @@ The following environment is tested:
   
 
 ```
+yum -y install yum-utils
+yum -y groupinstall development
 yum install \
 > https://repo.ius.io/ius-release-el7.rpm \
 > https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
